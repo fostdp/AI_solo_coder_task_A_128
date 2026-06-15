@@ -33,3 +33,32 @@ spring:
     import:
       - classpath:terrain-params.yml
       - classpath:weather-params.yml
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus,env
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+        step: 30s
+    tags:
+      application: silk-road-planner
+  info:
+    build:
+      enabled: true
+    env:
+      enabled: true
+
+info:
+  app:
+    name: Silk Road Route Planner
+    version: 1.0.0
+    description: Ancient Camel Caravan Silk Road Route Planning and Weather Risk Analysis System

@@ -150,6 +150,26 @@ CREATE INDEX idx_terrain_type ON terrain_grid (terrain_type);
 CREATE INDEX idx_water_geom ON water_sources USING GIST (geom);
 CREATE INDEX idx_alerts_active ON alerts (is_active, triggered_at DESC) WHERE is_active = TRUE;
 CREATE INDEX idx_alerts_route ON alerts (route_id) WHERE is_active = TRUE;
+CREATE INDEX idx_alerts_geom ON alerts USING GIST (geom);
+
+CREATE INDEX idx_seasonal_risk_route ON seasonal_risk_profiles (route_id, season);
+CREATE INDEX idx_seasonal_risk_type ON seasonal_risk_profiles (risk_type);
+
+CREATE INDEX idx_water_sources_type ON water_sources (source_type);
+CREATE INDEX idx_water_sources_available ON water_sources (is_active, water_available) WHERE is_active = TRUE;
+
+CREATE INDEX idx_terrain_elevation ON terrain_grid (elevation_m);
+CREATE INDEX idx_terrain_resistance ON terrain_grid (resistance_factor);
+
+ANALYZE routes;
+ANALYZE waypoints;
+ANALYZE weather_stations;
+ANALYZE weather_reports;
+ANALYZE caravans;
+ANALYZE terrain_grid;
+ANALYZE water_sources;
+ANALYZE alerts;
+ANALYZE seasonal_risk_profiles;
 
 INSERT INTO routes (name, name_en, description, geom, total_distance_km, difficulty_level) VALUES
 ('长安-敦煌主线', 'Chang''an-Dunhuang Main Route', '从长安出发经河西走廊至敦煌的丝绸之路主线', ST_GeomFromText('LINESTRING(108.94 34.26, 106.16 34.73, 103.83 36.06, 102.64 37.43, 100.45 38.93, 97.14 39.73, 94.66 40.14)', 4326), 1800, 'MODERATE'),

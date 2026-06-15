@@ -1,0 +1,129 @@
+version: '3.8'
+
+services:
+  postgis:
+    image: postgis/postgis:16-3.4-alpine
+    container_name: silkroad-postgis
+    environment:
+      POSTGRES_DB: silkroad
+      POSTGRES_USER: silkroad
+      POSTGRES_PASSWORD: silkroad123
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgis_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./deploy/postgres-tuning.conf:/etc/postgresql/postgresql.conf:ro
+    command: postgres -c config_file=/etc/postgresql/postgresql.conf
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U silkroad -d silkroad"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    networks:
+      - silkroad-net
+    restart: unless-stopped
+
+  mqtt:
+    image: eclipse-mosquitto:2.0
+    container_name: silkroad-mqtt
+    ports:
+      - "1883:1883"
+      - "9001:9001"
+    volumes:
+      - mosquitto_data:/mosquitto/data
+      - mosquitto_log:/mosquitto/log
+      - ./deploy/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+    healthcheck:
+      test: ["CMD", "mosquitto_sub", "-t", "$SYS/broker/version", "-C", "1", "-W", "3"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    networks:
+      - silkroad-net
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: silkroad-backend
+    depends_on:
+      postgis:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: docker
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgis:5432/silkroad
+      SPRING_DATASOURCE_USERNAME: silkroad
+      SPRING_DATASOURCE_PASSWORD: silkroad123
+      MQTT_BROKER: tcp://mqtt:1883
+      JAVA_OPTS: -XX:+UseG1GC -XX:MaxRAMPercentage=75.0 -XX:+ExitOnOutOfMemoryError -Dfile.encoding=UTF-8
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/actuator/health/liveness"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
+    networks:
+      - silkroad-net
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: silkroad-frontend
+    depends_on:
+      - backend
+    ports:
+      - "80:80"
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+    networks:
+      - silkroad-net
+    restart: unless-stopped
+
+  weather-simulator:
+    build:
+      context: ./simulator
+      dockerfile: Dockerfile
+    container_name: silkroad-weather-simulator
+    depends_on:
+      backend:
+        condition: service_healthy
+      mqtt:
+        condition: service_healthy
+    environment:
+      SIMULATOR_MODE: realtime
+      SEASON: spring
+      EXTREME_WEATHER: "false"
+      REPORT_INTERVAL: "3600"
+      BACKEND_URL: http://backend:8080/api
+      MQTT_ENABLED: "true"
+      MQTT_BROKER: tcp://mqtt:1883
+      MQTT_TOPIC: silkroad/weather
+    networks:
+      - silkroad-net
+    restart: unless-stopped
+
+volumes:
+  postgis_data:
+    driver: local
+  mosquitto_data:
+    driver: local
+  mosquitto_log:
+    driver: local
+
+networks:
+  silkroad-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16

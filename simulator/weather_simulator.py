@@ -2,6 +2,13 @@
 """
 古代驼队丝绸之路 - 气象站模拟器
 模拟20个气象站每小时上报温度、降水、风速、沙尘暴概率等数据
+
+支持：
+- 实时模式 / 历史回填模式 / 演示模式
+- 四季模拟（自动按月份切换 / 手动指定）
+- 极端天气模式（强沙尘暴、热浪、寒潮）
+- HTTP API上报 / MQTT发布
+- 环境变量配置（Docker友好）
 """
 
 import requests
@@ -9,10 +16,27 @@ import json
 import time
 import random
 import math
+import os
+import sys
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple
 
-API_BASE_URL = "http://localhost:8080/api"
+try:
+    import paho.mqtt.client as mqtt
+    HAS_MQTT = True
+except ImportError:
+    HAS_MQTT = False
+
+API_BASE_URL = os.getenv("BACKEND_URL", "http://localhost:8080/api")
+MQTT_BROKER = os.getenv("MQTT_BROKER", "localhost")
+MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
+MQTT_TOPIC = os.getenv("MQTT_TOPIC", "silkroad/weather")
+MQTT_ENABLED = os.getenv("MQTT_ENABLED", "false").lower() == "true"
+SIMULATOR_MODE = os.getenv("SIMULATOR_MODE", "demo")
+SEASON_OVERRIDE = os.getenv("SEASON", "").lower()
+EXTREME_WEATHER = os.getenv("EXTREME_WEATHER", "false").lower()
+REPORT_INTERVAL = int(os.getenv("REPORT_INTERVAL", "3600"))
+SPEED_FACTOR = int(os.getenv("SPEED_FACTOR", "1200"))
 
 STATIONS = [
     {"id": 1, "code": "WS-CG-001", "name": "长安气象站", "lng": 108.94, "lat": 34.26, "elevation": 405, "route_id": 1},
@@ -58,7 +82,43 @@ SEASON_HUMIDITY = {
     "winter": {"base": 45, "variance": 15},
 }
 
+EXTREME_WEATHER_MODES = {
+    "sandstorm": {
+        "wind_multiplier": 2.5,
+        "humidity_multiplier": 0.3,
+        "temp_offset": 5,
+        "sandstorm_boost": 0.4,
+        "description": "强沙尘暴模式"
+    },
+    "heatwave": {
+        "wind_multiplier": 1.2,
+        "humidity_multiplier": 0.5,
+        "temp_offset": 15,
+        "sandstorm_boost": 0.1,
+        "description": "热浪模式"
+    },
+    "coldwave": {
+        "wind_multiplier": 1.8,
+        "humidity_multiplier": 0.8,
+        "temp_offset": -20,
+        "sandstorm_boost": 0.05,
+        "description": "寒潮模式"
+    },
+    "drought": {
+        "wind_multiplier": 1.5,
+        "humidity_multiplier": 0.2,
+        "temp_offset": 8,
+        "sandstorm_boost": 0.25,
+        "description": "极端干旱模式"
+    }
+}
+
+_mqtt_client = None
+_mqtt_connected = False
+
 def get_season(month: int) -> str:
+    if SEASON_OVERRIDE and SEASON_OVERRIDE in ("spring", "summer", "autumn", "winter"):
+        return SEASON_OVERRIDE
     if 3 <= month <= 5:
         return "spring"
     elif 6 <= month <= 8:
@@ -262,6 +322,48 @@ def calculate_sandstorm_probability(wind_speed: float, humidity: float,
     
     return min(1.0, max(0.0, probability))
 
+def init_mqtt() -> bool:
+    global _mqtt_client, _mqtt_connected
+    if not HAS_MQTT or not MQTT_ENABLED:
+        return False
+    
+    try:
+        _mqtt_client = mqtt.Client(client_id=f"silkroad-simulator-{random.randint(1000,9999)}")
+        _mqtt_client.connect(MQTT_BROKER, MQTT_PORT, keepalive=60)
+        _mqtt_client.loop_start()
+        _mqtt_connected = True
+        print(f"  MQTT: 已连接到 {MQTT_BROKER}:{MQTT_PORT}")
+        return True
+    except Exception as e:
+        print(f"  MQTT 连接失败: {e}")
+        _mqtt_connected = False
+        return False
+
+def publish_mqtt(station_id: int, report: Dict) -> bool:
+    if not _mqtt_connected or not _mqtt_client:
+        return False
+    try:
+        topic = f"{MQTT_TOPIC}/{station_id}"
+        payload = json.dumps(report)
+        _mqtt_client.publish(topic, payload, qos=0)
+        return True
+    except Exception as e:
+        print(f"  MQTT发布失败: {e}")
+        return False
+
+def apply_extreme_weather(temperature: float, wind_speed: float, humidity: float,
+                           sandstorm_prob: float, mode: str) -> Tuple[float, float, float, float]:
+    if mode not in EXTREME_WEATHER_MODES:
+        return temperature, wind_speed, humidity, sandstorm_prob
+    
+    params = EXTREME_WEATHER_MODES[mode]
+    new_temp = temperature + params["temp_offset"]
+    new_wind = wind_speed * params["wind_multiplier"]
+    new_humidity = max(2, humidity * params["humidity_multiplier"])
+    new_sandstorm = min(1.0, sandstorm_prob + params["sandstorm_boost"])
+    
+    return round(new_temp, 1), round(new_wind, 1), round(new_humidity, 1), round(min(1.0, new_sandstorm), 3)
+
 def generate_weather_data(station: Dict, current_time: datetime) -> Dict:
     season = get_season(current_time.month)
     hour = current_time.hour
@@ -300,6 +402,15 @@ def generate_weather_data(station: Dict, current_time: datetime) -> Dict:
     
     air_pressure = round(1013 - station["elevation"] * 0.012 + random.gauss(0, 3), 1)
     
+    if EXTREME_WEATHER and EXTREME_WEATHER in EXTREME_WEATHER_MODES:
+        temperature, wind_speed, humidity, sandstorm_prob = apply_extreme_weather(
+            temperature, wind_speed, humidity, sandstorm_prob, EXTREME_WEATHER
+        )
+        visibility = 10.0
+        if sandstorm_prob > 0.5:
+            visibility = 10 * (1 - sandstorm_prob * 0.8)
+        visibility = round(max(0.1, visibility), 1)
+    
     return {
         "stationId": station["id"],
         "reportTime": current_time.isoformat(),
@@ -313,7 +424,10 @@ def generate_weather_data(station: Dict, current_time: datetime) -> Dict:
         "airPressureHpa": air_pressure
     }
 
-def submit_report(station_id: int, report: Dict, use_mock: bool = False) -> bool:
+def submit_report(station_id: int, report: Dict, use_mock: bool = False, use_mqtt: bool = False) -> bool:
+    if use_mqtt and _mqtt_connected:
+        publish_mqtt(station_id, report)
+    
     if use_mock:
         print(f"  [模拟] 气象站 {station_id}: {report['temperatureC']}°C, "
               f"风速 {report['windSpeedKmh']}km/h, 沙尘暴概率 {report['sandstormProbability']*100:.1f}%")
@@ -332,14 +446,24 @@ def submit_report(station_id: int, report: Dict, use_mock: bool = False) -> bool
         print(f"  ✗ 气象站 {station_id} 连接失败: {e}")
         return False
 
-def run_simulation(interval_seconds: int = 3600, speed_factor: int = 1, use_mock: bool = True):
+def run_simulation(interval_seconds: int = 3600, speed_factor: int = 1,
+                    use_mock: bool = True, use_mqtt: bool = False):
     print("=" * 60)
     print("  古代驼队丝绸之路 - 气象站模拟器")
     print("=" * 60)
     print(f"  气象站数量: {len(STATIONS)}")
     print(f"  上报间隔: {interval_seconds} 秒 (模拟 {interval_seconds / 3600 / speed_factor:.1f} 小时)")
     print(f"  模式: {'模拟' if use_mock else 'API上报'}")
+    if SEASON_OVERRIDE:
+        print(f"  季节: {SEASON_OVERRIDE} (固定)")
+    if EXTREME_WEATHER and EXTREME_WEATHER in EXTREME_WEATHER_MODES:
+        print(f"  极端天气: {EXTREME_WEATHER_MODES[EXTREME_WEATHER]['description']}")
+    if use_mqtt or MQTT_ENABLED:
+        print(f"  MQTT: {MQTT_BROKER}:{MQTT_PORT} -> {MQTT_TOPIC}")
     print("=" * 60)
+    
+    if use_mqtt or MQTT_ENABLED:
+        init_mqtt()
     
     current_time = datetime.now().replace(minute=0, second=0, microsecond=0)
     report_count = 0
@@ -351,7 +475,7 @@ def run_simulation(interval_seconds: int = 3600, speed_factor: int = 1, use_mock
             success_count = 0
             for station in STATIONS:
                 report = generate_weather_data(station, current_time)
-                if submit_report(station["id"], report, use_mock):
+                if submit_report(station["id"], report, use_mock, use_mqtt or MQTT_ENABLED):
                     success_count += 1
                     report_count += 1
             
@@ -373,7 +497,7 @@ def run_simulation(interval_seconds: int = 3600, speed_factor: int = 1, use_mock
     except KeyboardInterrupt:
         print(f"\n\n模拟器已停止，累计上报 {report_count} 条气象数据")
 
-def batch_backfill(start_date: str, end_date: str, use_mock: bool = False):
+def batch_backfill(start_date: str, end_date: str, use_mock: bool = False, use_mqtt: bool = False):
     print("=" * 60)
     print("  历史气象数据回填")
     print("=" * 60)
@@ -386,7 +510,14 @@ def batch_backfill(start_date: str, end_date: str, use_mock: bool = False):
     
     print(f"  时间范围: {start_date} 至 {end_date}")
     print(f"  预计数据量: {total_reports} 条")
+    if SEASON_OVERRIDE:
+        print(f"  季节: {SEASON_OVERRIDE} (固定)")
+    if EXTREME_WEATHER:
+        print(f"  极端天气: {EXTREME_WEATHER}")
     print("=" * 60)
+    
+    if use_mqtt or MQTT_ENABLED:
+        init_mqtt()
     
     current = start
     count = 0
@@ -395,7 +526,7 @@ def batch_backfill(start_date: str, end_date: str, use_mock: bool = False):
         while current < end:
             for station in STATIONS:
                 report = generate_weather_data(station, current)
-                submit_report(station["id"], report, use_mock)
+                submit_report(station["id"], report, use_mock, use_mqtt or MQTT_ENABLED)
                 count += 1
             
             if count % 200 == 0:
@@ -414,11 +545,11 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description="丝绸之路气象站模拟器")
     parser.add_argument("--mode", choices=["live", "backfill", "demo"],
-                        default="demo", help="运行模式")
-    parser.add_argument("--interval", type=int, default=3,
-                        help="上报间隔（秒），默认3秒（模拟1小时）")
-    parser.add_argument("--speed", type=int, default=1200,
-                        help="时间加速因子，默认1200倍速")
+                        default=SIMULATOR_MODE, help="运行模式")
+    parser.add_argument("--interval", type=int, default=REPORT_INTERVAL,
+                        help="上报间隔（秒）")
+    parser.add_argument("--speed", type=int, default=SPEED_FACTOR,
+                        help="时间加速因子")
     parser.add_argument("--start-date", type=str,
                         default="2020-01-01T00:00:00", help="回填开始时间")
     parser.add_argument("--end-date", type=str,
@@ -427,14 +558,38 @@ if __name__ == "__main__":
                         help="使用模拟模式，不调用API")
     parser.add_argument("--api", action="store_true", default=False,
                         help="使用真实API上报")
+    parser.add_argument("--season", choices=["spring", "summer", "autumn", "winter"],
+                        default="", help="固定季节，不按月份自动切换")
+    parser.add_argument("--extreme", choices=["sandstorm", "heatwave", "coldwave", "drought"],
+                        default="", help="极端天气模式")
+    parser.add_argument("--mqtt", action="store_true", default=MQTT_ENABLED,
+                        help="启用MQTT发布")
+    parser.add_argument("--mqtt-broker", type=str, default=MQTT_BROKER,
+                        help="MQTT Broker地址")
+    parser.add_argument("--mqtt-port", type=int, default=MQTT_PORT,
+                        help="MQTT端口")
+    parser.add_argument("--mqtt-topic", type=str, default=MQTT_TOPIC,
+                        help="MQTT主题前缀")
     
     args = parser.parse_args()
     use_mock = not args.api
     
+    if args.season:
+        SEASON_OVERRIDE = args.season
+    if args.extreme:
+        EXTREME_WEATHER = args.extreme
+    if args.mqtt_broker:
+        MQTT_BROKER = args.mqtt_broker
+    if args.mqtt_port:
+        MQTT_PORT = args.mqtt_port
+    if args.mqtt_topic:
+        MQTT_TOPIC = args.mqtt_topic
+    
     if args.mode == "live":
-        run_simulation(interval_seconds=args.interval, speed_factor=args.speed, use_mock=use_mock)
+        run_simulation(interval_seconds=args.interval, speed_factor=args.speed,
+                       use_mock=use_mock, use_mqtt=args.mqtt)
     elif args.mode == "backfill":
-        batch_backfill(args.start_date, args.end_date, use_mock=use_mock)
+        batch_backfill(args.start_date, args.end_date, use_mock=use_mock, use_mqtt=args.mqtt)
     else:
         print("演示模式：模拟24小时数据，每0.5秒更新一次")
-        run_simulation(interval_seconds=0.5, speed_factor=7200, use_mock=True)
+        run_simulation(interval_seconds=0.5, speed_factor=7200, use_mock=True, use_mqtt=args.mqtt)
