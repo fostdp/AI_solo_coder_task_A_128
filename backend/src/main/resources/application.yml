@@ -1,0 +1,46 @@
+server:
+  port: 8080
+  servlet:
+    context-path: /api
+
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5432/silkroad
+    username: silkroad
+    password: silkroad123
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 5
+
+  jpa:
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+    hibernate:
+      ddl-auto: none
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: true
+        jdbc:
+          time_zone: UTC
+
+  jackson:
+    serialization:
+      write-dates-as-timestamps: false
+    default-property-inclusion: non_null
+
+weather:
+  alert:
+    sandstorm-threshold: 0.6
+    wind-speed-threshold: 60.0
+    temperature-high-threshold: 45.0
+    temperature-low-threshold: -20.0
+    visibility-threshold: 1.0
+    water-supply-min-liters: 500
+
+pathfinding:
+  grid-resolution: 0.5
+  elevation-weight: 0.3
+  terrain-weight: 0.4
+  weather-weight: 0.3
+  max-iterations: 100000
