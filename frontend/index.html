@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>古代驼队丝绸之路路径规划与气象风险分析系统</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.css" />
+    <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+    <div id="app">
+        <header class="header">
+            <div class="logo">
+                <span class="icon">🐫</span>
+                <h1>丝绸之路驼队路径规划系统</h1>
+            </div>
+            <div class="header-actions">
+                <div class="weather-status">
+                    <span class="label">当前季节:</span>
+                    <select id="seasonSelect" class="season-select">
+                        <option value="SPRING">春季</option>
+                        <option value="SUMMER">夏季</option>
+                        <option value="AUTUMN">秋季</option>
+                        <option value="WINTER">冬季</option>
+                    </select>
+                </div>
+                <div class="connection-status" id="wsStatus">
+                    <span class="dot offline"></span>
+                    <span>未连接</span>
+                </div>
+            </div>
+        </header>
+
+        <div class="main-content">
+            <aside class="sidebar">
+                <div class="panel">
+                    <h2>路径规划</h2>
+                    <div class="form-group">
+                        <label>起点</label>
+                        <select id="startRoute" class="form-control">
+                            <option value="">选择起点</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>终点</label>
+                        <select id="endRoute" class="form-control">
+                            <option value="">选择终点</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>驼队速度 (km/h)</label>
+                        <input type="number" id="caravanSpeed" class="form-control" value="5" min="1" max="15" step="0.5" />
+                    </div>
+                    <div class="form-group checkbox-group">
+                        <input type="checkbox" id="preferOasis" checked />
+                        <label for="preferOasis">优先经过绿洲</label>
+                    </div>
+                    <button id="planBtn" class="btn btn-primary">规划最优路径</button>
+                    <div id="pathResult" class="path-result hidden"></div>
+                </div>
+
+                <div class="panel">
+                    <h2>图层控制</h2>
+                    <div class="layer-controls">
+                        <label class="layer-item">
+                            <input type="checkbox" id="layerRoutes" checked />
+                            <span>丝路线路</span>
+                        </label>
+                        <label class="layer-item">
+                            <input type="checkbox" id="layerWaypoints" checked />
+                            <span>驿站/绿洲</span>
+                        </label>
+                        <label class="layer-item">
+                            <input type="checkbox" id="layerCaravans" checked />
+                            <span>驼队位置</span>
+                        </label>
+                        <label class="layer-item">
+                            <input type="checkbox" id="layerWeatherStations" />
+                            <span>气象站</span>
+                        </label>
+                        <label class="layer-item">
+                            <input type="checkbox" id="layerHeatmap" />
+                            <span>沙尘暴热力图</span>
+                        </label>
+                        <label class="layer-item">
+                            <input type="checkbox" id="layerTempHeatmap" />
+                            <span>温度热力图</span>
+                        </label>
+                        <label class="layer-item">
+                            <input type="checkbox" id="layerWaterSources" />
+                            <span>水源地</span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <h2>实时告警</h2>
+                    <div id="alertsList" class="alerts-list">
+                        <div class="empty-state">暂无告警</div>
+                    </div>
+                </div>
+            </aside>
+
+            <main class="map-container">
+                <div id="map"></div>
+                <div class="map-legend">
+                    <h3>图例</h3>
+                    <div class="legend-item">
+                        <span class="legend-line route"></span>
+                        <span>丝绸之路</span>
+                    </div>
+                    <div class="legend-item">
+                        <span class="legend-icon camel">🐫</span>
+                        <span>驼队</span>
+                    </div>
+                    <div class="legend-item">
+                        <span class="legend-dot oasis"></span>
+                        <span>绿洲/水源</span>
+                    </div>
+                    <div class="legend-item">
+                        <span class="legend-dot station"></span>
+                        <span>气象站</span>
+                    </div>
+                    <div class="legend-item heat-legend">
+                        <div class="heat-scale"></div>
+                        <span>沙尘暴风险</span>
+                    </div>
+                </div>
+                <div class="stats-bar">
+                    <div class="stat-item">
+                        <span class="stat-label">在线驼队</span>
+                        <span class="stat-value" id="statCaravans">0</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">活跃告警</span>
+                        <span class="stat-value alert" id="statAlerts">0</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">气象站</span>
+                        <span class="stat-value" id="statStations">20</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="stat-label">线路数量</span>
+                        <span class="stat-value" id="statRoutes">10</span>
+                    </div>
+                </div>
+            </main>
+
+            <aside class="sidebar right">
+                <div class="panel">
+                    <h2>气象风险分析</h2>
+                    <div class="form-group">
+                        <label>选择线路</label>
+                        <select id="riskRoute" class="form-control">
+                            <option value="">选择线路</option>
+                        </select>
+                    </div>
+                    <button id="analyzeBtn" class="btn btn-secondary">分析风险</button>
+                    <div id="riskAnalysis" class="risk-analysis hidden"></div>
+                </div>
+
+                <div class="panel">
+                    <h2>气象数据</h2>
+                    <div class="form-group">
+                        <label>气象站</label>
+                        <select id="stationSelect" class="form-control">
+                            <option value="">选择气象站</option>
+                        </select>
+                    </div>
+                    <div id="stationWeather" class="station-weather">
+                        <div class="empty-state">选择气象站查看详情</div>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <h2>驼队管理</h2>
+                    <div id="caravanList" class="caravan-list"></div>
+                </div>
+            </aside>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@stomp/stompjs@7.0.0/bundles/stomp.umd.min.js"></script>
+    <script src="js/config.js"></script>
+    <script src="js/api.js"></script>
+    <script src="js/canvas-icons.js"></script>
+    <script src="js/map.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>
