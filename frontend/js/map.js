@@ -11,6 +11,10 @@ const SilkRoadMap = {
         plannedPath: null
     },
     caravansData: [],
+    _heatmapLayers: {
+        sandstorm: null,
+        temperature: null
+    },
 
     init() {
         this.map = L.map('map', {
@@ -225,38 +229,33 @@ const SilkRoadMap = {
 
     showSandstormHeatmap(heatData) {
         this.hideSandstormHeatmap();
-
-        const points = heatData.map(p => [p.lat, p.lng, p.value]);
-        this.layers.sandstormHeat = L.heatLayer(points, {
+        this._heatmapLayers.sandstorm = this._createWebGLHeatmapLayer({
             radius: 40,
             blur: 25,
-            maxZoom: 10,
-            max: 1.0,
+            maxOpacity: 0.75,
             gradient: {
                 0.0: '#22c55e',
                 0.4: '#eab308',
                 0.7: '#ef4444',
                 1.0: '#7c2d12'
             }
-        }).addTo(this.map);
+        }, heatData);
+        this._heatmapLayers.sandstorm.addTo(this.map);
     },
 
     hideSandstormHeatmap() {
-        if (this.layers.sandstormHeat) {
-            this.map.removeLayer(this.layers.sandstormHeat);
-            this.layers.sandstormHeat = null;
+        if (this._heatmapLayers.sandstorm) {
+            this.map.removeLayer(this._heatmapLayers.sandstorm);
+            this._heatmapLayers.sandstorm = null;
         }
     },
 
     showTemperatureHeatmap(heatData) {
         this.hideTemperatureHeatmap();
-
-        const points = heatData.map(p => [p.lat, p.lng, p.value]);
-        this.layers.tempHeat = L.heatLayer(points, {
+        this._heatmapLayers.temperature = this._createWebGLHeatmapLayer({
             radius: 35,
             blur: 20,
-            maxZoom: 10,
-            max: 1.0,
+            maxOpacity: 0.7,
             gradient: {
                 0.0: '#3b82f6',
                 0.3: '#22c55e',
@@ -264,14 +263,205 @@ const SilkRoadMap = {
                 0.8: '#ef4444',
                 1.0: '#7c2d12'
             }
-        }).addTo(this.map);
+        }, heatData);
+        this._heatmapLayers.temperature.addTo(this.map);
     },
 
     hideTemperatureHeatmap() {
-        if (this.layers.tempHeat) {
-            this.map.removeLayer(this.layers.tempHeat);
-            this.layers.tempHeat = null;
+        if (this._heatmapLayers.temperature) {
+            this.map.removeLayer(this._heatmapLayers.temperature);
+            this._heatmapLayers.temperature = null;
         }
+    },
+
+    _createWebGLHeatmapLayer(options, data) {
+        const map = this.map;
+        let heatmap = null;
+        let canvas = null;
+        let pane = null;
+        let frameId = null;
+        let needsRender = true;
+
+        const layer = L.Layer.extend({
+            onAdd: function(map) {
+                pane = map.getPane('overlayPane');
+                
+                canvas = document.createElement('canvas');
+                canvas.style.position = 'absolute';
+                canvas.style.top = '0';
+                canvas.style.left = '0';
+                canvas.style.pointerEvents = 'none';
+                canvas.style.zIndex = '500';
+                
+                pane.appendChild(canvas);
+
+                heatmap = new WebGLHeatmap(Object.assign({
+                    useDevicePixelRatio: true,
+                    maxPoints: 5000
+                }, options));
+
+                this._updateSize();
+                this._updateHeatmapData();
+
+                map.on('move', this._scheduleRender, this);
+                map.on('zoom', this._scheduleRender, this);
+                map.on('resize', this._updateSize, this);
+                map.on('moveend', this._scheduleRender, this);
+                map.on('zoomend', this._scheduleRender, this);
+
+                this._scheduleRender();
+            },
+
+            onRemove: function(map) {
+                if (frameId) {
+                    cancelAnimationFrame(frameId);
+                    frameId = null;
+                }
+                
+                if (canvas && pane) {
+                    pane.removeChild(canvas);
+                }
+                
+                if (heatmap) {
+                    heatmap.destroy();
+                    heatmap = null;
+                }
+                
+                map.off('move', this._scheduleRender, this);
+                map.off('zoom', this._scheduleRender, this);
+                map.off('resize', this._updateSize, this);
+                map.off('moveend', this._scheduleRender, this);
+                map.off('zoomend', this._scheduleRender, this);
+            },
+
+            _updateSize: function() {
+                const size = map.getSize();
+                if (heatmap) {
+                    heatmap.setSize(size.x, size.y);
+                }
+                if (canvas) {
+                    canvas.style.width = size.x + 'px';
+                    canvas.style.height = size.y + 'px';
+                }
+                needsRender = true;
+                this._scheduleRender();
+            },
+
+            _updateHeatmapData: function() {
+                if (!heatmap || !data) return;
+                
+                const bounds = map.getBounds();
+                const northEast = bounds.getNorthEast();
+                const southWest = bounds.getSouthWest();
+                const topLeft = map.latLngToLayerPoint([northEast.lat, southWest.lng]);
+                
+                const screenPoints = [];
+                const batchSize = 200;
+                let pointsProcessed = 0;
+
+                const processBatch = () => {
+                    const endIndex = Math.min(pointsProcessed + batchSize, data.length);
+                    
+                    for (let i = pointsProcessed; i < endIndex; i++) {
+                        const p = data[i];
+                        if (!p || p.lng == null || p.lat == null) continue;
+                        
+                        if (p.lng < southWest.lng || p.lng > northEast.lng ||
+                            p.lat < southWest.lat || p.lat > northEast.lat) {
+                            continue;
+                        }
+                        
+                        const point = map.latLngToContainerPoint([p.lat, p.lng]);
+                        screenPoints.push([point.x, point.y, p.value || 0]);
+                    }
+                    
+                    pointsProcessed = endIndex;
+                    
+                    if (pointsProcessed < data.length) {
+                        setTimeout(processBatch, 0);
+                    } else {
+                        heatmap.setData(screenPoints);
+                        needsRender = true;
+                        this._scheduleRender();
+                    }
+                };
+                
+                processBatch();
+            },
+
+            _scheduleRender: function() {
+                if (frameId) return;
+                
+                frameId = requestAnimationFrame(() => {
+                    frameId = null;
+                    this._render();
+                });
+            },
+
+            _render: function() {
+                if (!heatmap || !canvas) return;
+
+                const size = map.getSize();
+                const bounds = map.getBounds();
+                const northEast = bounds.getNorthEast();
+                const southWest = bounds.getSouthWest();
+                
+                const topLeft = map.latLngToContainerPoint([northEast.lat, southWest.lng]);
+                canvas.style.transform = `translate3d(${topLeft.x}px, ${topLeft.y}px, 0)`;
+
+                if (needsRender) {
+                    const screenPoints = [];
+                    
+                    for (let i = 0; i < data.length; i++) {
+                        const p = data[i];
+                        if (!p || p.lng == null || p.lat == null) continue;
+                        
+                        if (p.lng < southWest.lng || p.lng > northEast.lng ||
+                            p.lat < southWest.lat || p.lat > northEast.lat) {
+                            continue;
+                        }
+                        
+                        const point = map.latLngToContainerPoint([p.lat, p.lng]);
+                        const localX = point.x - topLeft.x;
+                        const localY = point.y - topLeft.y;
+                        
+                        if (localX >= -100 && localX <= size.x + 100 &&
+                            localY >= -100 && localY <= size.y + 100) {
+                            screenPoints.push([localX, localY, p.value || 0]);
+                        }
+                    }
+                    
+                    heatmap.setData(screenPoints);
+                    needsRender = false;
+                }
+                
+                heatmap.render();
+                
+                const ctx = canvas.getContext('2d') || canvas.getContext('webgl');
+                if (ctx && heatmap.getCanvas()) {
+                    const heatmapCanvas = heatmap.getCanvas();
+                    if (canvas.width !== heatmapCanvas.width || canvas.height !== heatmapCanvas.height) {
+                        canvas.width = heatmapCanvas.width;
+                        canvas.height = heatmapCanvas.height;
+                    }
+                    
+                    const canvasCtx = canvas.getContext('2d');
+                    if (canvasCtx) {
+                        canvasCtx.clearRect(0, 0, canvas.width, canvas.height);
+                        canvasCtx.drawImage(heatmapCanvas, 0, 0);
+                    }
+                }
+            },
+
+            updateData: function(newData) {
+                data = newData;
+                this._updateHeatmapData();
+                needsRender = true;
+                this._scheduleRender();
+            }
+        });
+
+        return new layer();
     },
 
     showPlannedPath(pathPoints) {

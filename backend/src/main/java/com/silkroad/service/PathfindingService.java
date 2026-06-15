@@ -14,6 +14,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.*;
+import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
@@ -39,6 +40,11 @@ public class PathfindingService {
     private int maxIterations;
 
     private static final double EARTH_RADIUS_KM = 6371.0;
+    private static final int GENETIC_POPULATION_SIZE = 50;
+    private static final int GENETIC_MAX_GENERATIONS = 100;
+    private static final double GENETIC_MUTATION_RATE = 0.15;
+    private static final double GENETIC_CROSSOVER_RATE = 0.7;
+    private static final double OASIS_BONUS_THRESHOLD = 50.0;
 
     public PathResult findOptimalPath(PathRequest request) {
         long startTime = System.currentTimeMillis();
@@ -54,19 +60,71 @@ public class PathfindingService {
 
         GridNode[][] grid = initializeGrid(minLng, minLat, gridWidth, gridHeight);
 
-        int startX = (int) Math.round((request.getStartLng() - minLng) / gridResolution);
-        int startY = (int) Math.round((request.getStartLat() - minLat) / gridResolution);
-        int endX = (int) Math.round((request.getEndLng() - minLng) / gridResolution);
-        int endY = (int) Math.round((request.getEndLat() - minLat) / gridResolution);
-
-        startX = clamp(startX, 0, gridWidth - 1);
-        startY = clamp(startY, 0, gridHeight - 1);
-        endX = clamp(endX, 0, gridWidth - 1);
-        endY = clamp(endY, 0, gridHeight - 1);
+        int startX = clamp(startX = (int) Math.round((request.getStartLng() - minLng) / gridResolution), 0, gridWidth - 1);
+        int startY = clamp((int) Math.round((request.getStartLat() - minLat) / gridResolution), 0, gridHeight - 1);
+        int endX = clamp((int) Math.round((request.getEndLng() - minLng) / gridResolution), 0, gridWidth - 1);
+        int endY = clamp((int) Math.round((request.getEndLat() - minLat) / gridResolution), 0, gridHeight - 1);
 
         GridNode startNode = grid[startY][startX];
         GridNode endNode = grid[endY][endX];
 
+        PathResult aStarResult = runAStar(startNode, endNode, grid, gridWidth, gridHeight, request, season);
+
+        List<double[]> oasisPoints = identifyOasisPoints(grid, minLng, minLat, gridWidth, gridHeight);
+        PathResult geneticResult = null;
+        String algorithmUsed = "A* with terrain and weather heuristic";
+
+        if (oasisPoints.size() >= 2 && Boolean.TRUE.equals(request.getPreferOasis())) {
+            try {
+                geneticResult = runGeneticAlgorithm(
+                        new double[]{request.getStartLng(), request.getStartLat()},
+                        new double[]{request.getEndLng(), request.getEndLat()},
+                        oasisPoints, request, season);
+                algorithmUsed = "A* + Genetic Algorithm (Oasis Optimization)";
+            } catch (Exception e) {
+                geneticResult = null;
+            }
+        }
+
+        PathResult finalResult;
+        if (geneticResult != null && geneticResult.getTotalRiskScore() != null &&
+                aStarResult.getTotalRiskScore() != null &&
+                geneticResult.getTotalRiskScore() < aStarResult.getTotalRiskScore() * 1.15 &&
+                (geneticResult.getTotalDistanceKm() != null &&
+                 aStarResult.getTotalDistanceKm() != null &&
+                 geneticResult.getTotalDistanceKm() < aStarResult.getTotalDistanceKm() * 1.25)) {
+            finalResult = PathResult.builder()
+                    .pathPoints(geneticResult.getPathPoints())
+                    .totalDistanceKm(geneticResult.getTotalDistanceKm())
+                    .estimatedHours(geneticResult.getEstimatedHours())
+                    .totalRiskScore(geneticResult.getTotalRiskScore())
+                    .riskLevel(geneticResult.getRiskLevel())
+                    .waypointNames(geneticResult.getWaypointNames())
+                    .elevationGainM(geneticResult.getElevationGainM())
+                    .waterRequiredLiters(geneticResult.getWaterRequiredLiters())
+                    .algorithm(algorithmUsed)
+                    .computationTimeMs(System.currentTimeMillis() - startTime)
+                    .build();
+        } else {
+            finalResult = PathResult.builder()
+                    .pathPoints(aStarResult.getPathPoints())
+                    .totalDistanceKm(aStarResult.getTotalDistanceKm())
+                    .estimatedHours(aStarResult.getEstimatedHours())
+                    .totalRiskScore(aStarResult.getTotalRiskScore())
+                    .riskLevel(aStarResult.getRiskLevel())
+                    .waypointNames(aStarResult.getWaypointNames())
+                    .elevationGainM(aStarResult.getElevationGainM())
+                    .waterRequiredLiters(aStarResult.getWaterRequiredLiters())
+                    .algorithm(algorithmUsed)
+                    .computationTimeMs(System.currentTimeMillis() - startTime)
+                    .build();
+        }
+
+        return finalResult;
+    }
+
+    private PathResult runAStar(GridNode startNode, GridNode endNode, GridNode[][] grid,
+                                int gridWidth, int gridHeight, PathRequest request, Season season) {
         startNode.setGCost(0);
         startNode.setHCost(haversineDistance(startNode.getLng(), startNode.getLat(),
                 endNode.getLng(), endNode.getLat()));
@@ -108,8 +166,402 @@ public class PathfindingService {
             iterations++;
         }
 
-        return buildPathResult(startNode, endNode, request, season,
-                System.currentTimeMillis() - startTime, iterations);
+        return buildPathResult(startNode, endNode, request, season, 0, iterations);
+    }
+
+    private PathResult runGeneticAlgorithm(double[] start, double[] end, List<double[]> oasisPoints,
+                                            PathRequest request, Season season) {
+        if (oasisPoints.size() > 15) {
+            oasisPoints = filterRelevantOases(start, end, oasisPoints, 12);
+        }
+
+        List<List<double[]>> population = initializeGeneticPopulation(start, end, oasisPoints);
+
+        double bestFitness = Double.NEGATIVE_INFINITY;
+        List<double[]> bestPath = null;
+        int generationsWithoutImprovement = 0;
+
+        for (int gen = 0; gen < GENETIC_MAX_GENERATIONS; gen++) {
+            List<Double> fitnessScores = new ArrayList<>();
+            double maxFitness = Double.NEGATIVE_INFINITY;
+            List<double[]> genBestPath = null;
+
+            for (List<double[]> path : population) {
+                double fitness = calculateFitness(path, request, season);
+                fitnessScores.add(fitness);
+                if (fitness > maxFitness) {
+                    maxFitness = fitness;
+                    genBestPath = path;
+                }
+            }
+
+            if (maxFitness > bestFitness) {
+                bestFitness = maxFitness;
+                bestPath = new ArrayList<>(genBestPath);
+                generationsWithoutImprovement = 0;
+            } else {
+                generationsWithoutImprovement++;
+                if (generationsWithoutImprovement >= 15) {
+                    break;
+                }
+            }
+
+            List<List<double[]>> newPopulation = new ArrayList<>();
+            newPopulation.add(bestPath);
+            newPopulation.add(genBestPath);
+
+            while (newPopulation.size() < GENETIC_POPULATION_SIZE) {
+                List<double[]> parent1 = tournamentSelection(population, fitnessScores);
+                List<double[]> parent2 = tournamentSelection(population, fitnessScores);
+
+                if (Math.random() < GENETIC_CROSSOVER_RATE) {
+                    List<List<double[]>> children = orderCrossover(parent1, parent2, start, end);
+                    newPopulation.add(children.get(0));
+                    if (newPopulation.size() < GENETIC_POPULATION_SIZE) {
+                        newPopulation.add(children.get(1));
+                    }
+                } else {
+                    newPopulation.add(new ArrayList<>(parent1));
+                    if (newPopulation.size() < GENETIC_POPULATION_SIZE) {
+                        newPopulation.add(new ArrayList<>(parent2));
+                    }
+                }
+
+                if (Math.random() < GENETIC_MUTATION_RATE) {
+                    mutate(newPopulation.get(newPopulation.size() - 1), oasisPoints, start, end);
+                }
+            }
+
+            population = newPopulation;
+        }
+
+        if (bestPath == null) {
+            return null;
+        }
+
+        bestPath = smoothPath(bestPath);
+        return buildGeneticPathResult(bestPath, request, season);
+    }
+
+    private List<double[]> filterRelevantOases(double[] start, double[] end, List<double[]> oases, int maxCount) {
+        List<double[]> filtered = new ArrayList<>(oases);
+        filtered.sort((a, b) -> {
+            double distA = haversineDistance(start[0], start[1], a[0], a[1]) +
+                    haversineDistance(a[0], a[1], end[0], end[1]);
+            double distB = haversineDistance(start[0], start[1], b[0], b[1]) +
+                    haversineDistance(b[0], b[1], end[0], end[1]);
+            return Double.compare(distA, distB);
+        });
+        return filtered.subList(0, Math.min(maxCount, filtered.size()));
+    }
+
+    private List<List<double[]>> initializeGeneticPopulation(double[] start, double[] end, List<double[]> oasisPoints) {
+        List<List<double[]>> population = new ArrayList<>();
+
+        List<double[]> directPath = new ArrayList<>();
+        directPath.add(start);
+        directPath.add(end);
+        population.add(directPath);
+
+        for (int i = 0; i < GENETIC_POPULATION_SIZE - 1; i++) {
+            List<double[]> path = new ArrayList<>();
+            path.add(start);
+
+            int numOases = new Random().nextInt(Math.min(oasisPoints.size(), 6)) + 1;
+            List<double[]> shuffled = new ArrayList<>(oasisPoints);
+            Collections.shuffle(shuffled);
+
+            for (int j = 0; j < numOases; j++) {
+                path.add(shuffled.get(j));
+            }
+
+            sortPathByBearing(path, start, end);
+            path.add(end);
+            population.add(path);
+        }
+
+        return population;
+    }
+
+    private void sortPathByBearing(List<double[]> path, double[] start, double[] end) {
+        if (path.size() <= 2) return;
+        List<double[]> intermediate = path.subList(1, path.size());
+        intermediate.sort((a, b) -> {
+            double bearingA = calculateBearing(start[0], start[1], a[0], a[1]);
+            double bearingB = calculateBearing(start[0], start[1], b[0], b[1]);
+            return Double.compare(bearingA, bearingB);
+        });
+    }
+
+    private double calculateBearing(double lng1, double lat1, double lng2, double lat2) {
+        double dLng = Math.toRadians(lng2 - lng1);
+        double lat1Rad = Math.toRadians(lat1);
+        double lat2Rad = Math.toRadians(lat2);
+        double y = Math.sin(dLng) * Math.cos(lat2Rad);
+        double x = Math.cos(lat1Rad) * Math.sin(lat2Rad) -
+                Math.sin(lat1Rad) * Math.cos(lat2Rad) * Math.cos(dLng);
+        return (Math.atan2(y, x) + 2 * Math.PI) % (2 * Math.PI);
+    }
+
+    private double calculateFitness(List<double[]> path, PathRequest request, Season season) {
+        double totalDistance = 0;
+        double totalRisk = 0;
+        int oasisCount = 0;
+        double totalElevation = 0;
+
+        for (int i = 1; i < path.size(); i++) {
+            double[] prev = path.get(i - 1);
+            double[] curr = path.get(i);
+
+            double dist = haversineDistance(prev[0], prev[1], curr[0], curr[1]);
+            totalDistance += dist;
+
+            double terrainFactor = estimateTerrainFactor(curr[0], curr[1]);
+            double weatherFactor = getSeasonalWeatherFactor(season, curr[0], curr[1], 1000);
+            double risk = (terrainFactor * 0.6 + (weatherFactor - 1) * 0.4);
+            totalRisk += risk * dist;
+
+            if (isNearOasis(curr[0], curr[1])) {
+                oasisCount++;
+            }
+        }
+
+        double avgRisk = totalRisk / Math.max(1, totalDistance);
+        double oasisBonus = oasisCount * 15;
+        double distancePenalty = totalDistance * 0.1;
+        double riskPenalty = avgRisk * 100;
+
+        return oasisBonus - distancePenalty - riskPenalty;
+    }
+
+    private double estimateTerrainFactor(double lng, double lat) {
+        if (isNearOasis(lng, lat)) return 0.1;
+
+        double[] mountains = {{75.23, 39.72}, {106.16, 34.73}};
+        for (double[] m : mountains) {
+            if (haversineDistance(lng, lat, m[0], m[1]) < 50) {
+                return 0.7;
+            }
+        }
+
+        if (lng > 90 && lng < 100 && lat > 38 && lat < 42) {
+            return 0.8;
+        }
+
+        return 0.4;
+    }
+
+    private boolean isNearOasis(double lng, double lat) {
+        double[] oasisLngs = {94.66, 89.55, 85.54, 80.05, 76.87, 74.87, 66.96, 93.51, 88.23, 80.03};
+        double[] oasisLats = {40.14, 40.51, 39.48, 36.95, 39.42, 40.12, 39.65, 42.83, 44.01, 43.27};
+
+        for (int i = 0; i < oasisLngs.length; i++) {
+            if (haversineDistance(lng, lat, oasisLngs[i], oasisLats[i]) < OASIS_BONUS_THRESHOLD) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private List<double[]> tournamentSelection(List<List<double[]>> population, List<Double> fitness) {
+        Random rand = new Random();
+        int i1 = rand.nextInt(population.size());
+        int i2 = rand.nextInt(population.size());
+        return fitness.get(i1) > fitness.get(i2) ? population.get(i1) : population.get(i2);
+    }
+
+    private List<List<double[]>> orderCrossover(List<double[]> parent1, List<double[]> parent2,
+                                                 double[] start, double[] end) {
+        List<double[]> mid1 = new ArrayList<>(parent1.subList(1, parent1.size() - 1));
+        List<double[]> mid2 = new ArrayList<>(parent2.subList(1, parent2.size() - 1));
+
+        Set<double[]> set1 = new LinkedHashSet<>(mid1);
+        Set<double[]> set2 = new LinkedHashSet<>(mid2);
+
+        Random rand = new Random();
+        int cutPoint1 = rand.nextInt(Math.max(1, mid1.size()));
+        int cutPoint2 = rand.nextInt(Math.max(1, mid2.size()));
+
+        List<double[]> child1Mid = new ArrayList<>();
+        List<double[]> child2Mid = new ArrayList<>();
+
+        for (int i = 0; i < Math.min(cutPoint1, mid2.size()); i++) {
+            child1Mid.add(mid2.get(i));
+        }
+        for (double[] point : mid1) {
+            if (!containsPoint(child1Mid, point)) {
+                child1Mid.add(point);
+            }
+        }
+
+        for (int i = 0; i < Math.min(cutPoint2, mid1.size()); i++) {
+            child2Mid.add(mid1.get(i));
+        }
+        for (double[] point : mid2) {
+            if (!containsPoint(child2Mid, point)) {
+                child2Mid.add(point);
+            }
+        }
+
+        List<double[]> child1 = new ArrayList<>();
+        child1.add(start);
+        child1.addAll(child1Mid);
+        child1.add(end);
+
+        List<double[]> child2 = new ArrayList<>();
+        child2.add(start);
+        child2.addAll(child2Mid);
+        child2.add(end);
+
+        sortPathByBearing(child1, start, end);
+        sortPathByBearing(child2, start, end);
+
+        return Arrays.asList(child1, child2);
+    }
+
+    private boolean containsPoint(List<double[]> list, double[] point) {
+        for (double[] p : list) {
+            if (Math.abs(p[0] - point[0]) < 0.01 && Math.abs(p[1] - point[1]) < 0.01) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void mutate(List<double[]> path, List<double[]> oasisPoints, double[] start, double[] end) {
+        if (path.size() <= 2) return;
+
+        Random rand = new Random();
+        int mutationType = rand.nextInt(3);
+
+        switch (mutationType) {
+            case 0:
+                if (path.size() > 3 && oasisPoints.size() > 0) {
+                    int insertPos = rand.nextInt(path.size() - 2) + 1;
+                    double[] newOasis = oasisPoints.get(rand.nextInt(oasisPoints.size()));
+                    if (!containsPoint(path, newOasis)) {
+                        path.add(insertPos, newOasis);
+                    }
+                }
+                break;
+            case 1:
+                if (path.size() > 3) {
+                    int removePos = rand.nextInt(path.size() - 2) + 1;
+                    path.remove(removePos);
+                }
+                break;
+            case 2:
+                if (path.size() > 4) {
+                    int pos1 = rand.nextInt(path.size() - 2) + 1;
+                    int pos2 = rand.nextInt(path.size() - 2) + 1;
+                    if (pos1 != pos2) {
+                        double[] temp = path.get(pos1);
+                        path.set(pos1, path.get(pos2));
+                        path.set(pos2, temp);
+                    }
+                }
+                break;
+        }
+
+        sortPathByBearing(path, start, end);
+    }
+
+    private List<double[]> smoothPath(List<double[]> path) {
+        if (path.size() <= 2) return path;
+
+        List<double[]> smoothed = new ArrayList<>();
+        smoothed.add(path.get(0));
+
+        for (int i = 1; i < path.size() - 1; i++) {
+            double[] prev = path.get(i - 1);
+            double[] curr = path.get(i);
+            double[] next = path.get(i + 1);
+
+            double distPrev = haversineDistance(prev[0], prev[1], curr[0], curr[1]);
+            double distNext = haversineDistance(curr[0], curr[1], next[0], next[1]);
+            double directDist = haversineDistance(prev[0], prev[1], next[0], next[1]);
+
+            if (distPrev + distNext < directDist * 1.3 || isNearOasis(curr[0], curr[1])) {
+                smoothed.add(curr);
+            }
+        }
+
+        smoothed.add(path.get(path.size() - 1));
+        return smoothed;
+    }
+
+    private PathResult buildGeneticPathResult(List<double[]> path, PathRequest request, Season season) {
+        List<double[]> densePath = generateDensePath(path);
+        List<String> waypointNames = new ArrayList<>();
+        double totalDistance = 0;
+        double elevationGain = 0;
+        double totalRisk = 0;
+
+        for (int i = 1; i < path.size(); i++) {
+            double[] prev = path.get(i - 1);
+            double[] curr = path.get(i);
+            totalDistance += haversineDistance(prev[0], prev[1], curr[0], curr[1]);
+            if (isNearOasis(curr[0], curr[1])) {
+                waypointNames.add("绿洲补给点 " + waypointNames.size());
+            }
+        }
+
+        for (int i = 1; i < densePath.size(); i++) {
+            double[] prev = densePath.get(i - 1);
+            double[] curr = densePath.get(i);
+            double risk = 0.3 + estimateTerrainFactor(curr[0], curr[1]) * 0.5;
+            totalRisk += risk;
+        }
+
+        double avgRisk = totalRisk / densePath.size();
+        double speed = request.getCaravanSpeed() != null ? request.getCaravanSpeed() : 5.0;
+        double estimatedHours = totalDistance / speed;
+        double waterPerDay = 200;
+        double waterRequired = estimatedHours / 24 * waterPerDay;
+
+        return PathResult.builder()
+                .pathPoints(densePath)
+                .totalDistanceKm(round2(totalDistance))
+                .estimatedHours(round2(estimatedHours))
+                .totalRiskScore(round2(avgRisk))
+                .riskLevel(getRiskLevel(avgRisk))
+                .waypointNames(waypointNames)
+                .elevationGainM(round2(elevationGain))
+                .waterRequiredLiters(round2(waterRequired))
+                .build();
+    }
+
+    private List<double[]> generateDensePath(List<double[]> sparsePath) {
+        List<double[]> dense = new ArrayList<>();
+        for (int i = 0; i < sparsePath.size() - 1; i++) {
+            double[] from = sparsePath.get(i);
+            double[] to = sparsePath.get(i + 1);
+            double dist = haversineDistance(from[0], from[1], to[0], to[1]);
+            int steps = Math.max(2, (int) (dist / 10));
+
+            dense.add(from);
+            for (int s = 1; s < steps; s++) {
+                double ratio = (double) s / steps;
+                dense.add(new double[]{
+                        from[0] + (to[0] - from[0]) * ratio,
+                        from[1] + (to[1] - from[1]) * ratio
+                });
+            }
+        }
+        dense.add(sparsePath.get(sparsePath.size() - 1));
+        return dense;
+    }
+
+    private List<double[]> identifyOasisPoints(GridNode[][] grid, double minLng, double minLat,
+                                               int width, int height) {
+        List<double[]> oases = new ArrayList<>();
+        double[] oasisLngs = {94.66, 89.55, 85.54, 80.05, 76.87, 74.87, 66.96, 93.51, 88.23, 80.03};
+        double[] oasisLats = {40.14, 40.51, 39.48, 36.95, 39.42, 40.12, 39.65, 42.83, 44.01, 43.27};
+
+        for (int i = 0; i < oasisLngs.length; i++) {
+            oases.add(new double[]{oasisLngs[i], oasisLats[i]});
+        }
+        return oases;
     }
 
     private GridNode[][] initializeGrid(double minLng, double minLat, int width, int height) {
@@ -208,8 +660,12 @@ public class PathfindingService {
     }
 
     private double getSeasonalWeatherFactor(Season season, GridNode node) {
+        return getSeasonalWeatherFactor(season, node.getLng(), node.getLat(), node.getElevationM());
+    }
+
+    private double getSeasonalWeatherFactor(Season season, double lng, double lat, double elevation) {
         double baseFactor = 1.0;
-        String terrain = node.getTerrainType();
+        String terrain = estimateTerrainType(lng, lat, elevation);
 
         switch (season) {
             case SPRING:
@@ -221,7 +677,7 @@ public class PathfindingService {
                 if ("DESERT".equals(terrain) || "SAND_DUNES".equals(terrain)) {
                     baseFactor = 1.5;
                 }
-                baseFactor += (node.getElevationM() / 2000.0) * 0.2;
+                baseFactor += (elevation / 2000.0) * 0.2;
                 break;
             case AUTUMN:
                 baseFactor = 1.1;
@@ -236,6 +692,14 @@ public class PathfindingService {
                 break;
         }
         return baseFactor;
+    }
+
+    private String estimateTerrainType(double lng, double lat, double elevation) {
+        if (isNearOasis(lng, lat)) return "OASIS";
+        if (elevation > 3000) return "HIGH_MOUNTAINS";
+        if (elevation > 1800) return "MOUNTAINS";
+        if (lng > 90 && lng < 100 && lat > 38 && lat < 42) return "DESERT";
+        return "DESERT_STEPPE";
     }
 
     private PathResult buildPathResult(GridNode start, GridNode end, PathRequest request,

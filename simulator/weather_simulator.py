@@ -82,8 +82,150 @@ def get_terrain_type(station: Dict) -> str:
         return "DESERT"
     return "DESERT_STEPPE"
 
+MAJOR_MOUNTAINS = [
+    {"min_lat": 35.0, "max_lat": 39.0, "min_lng": 75.0, "max_lng": 80.0, "height": 5500, "name": "昆仑山"},
+    {"min_lat": 39.0, "max_lat": 45.0, "min_lng": 74.0, "max_lng": 96.0, "height": 4000, "name": "天山山脉"},
+    {"min_lat": 35.0, "max_lat": 40.0, "min_lng": 95.0, "max_lng": 104.0, "height": 3500, "name": "祁连山"},
+    {"min_lat": 32.0, "max_lat": 36.0, "min_lng": 80.0, "max_lng": 95.0, "height": 6000, "name": "喀喇昆仑山"},
+    {"min_lat": 40.0, "max_lat": 42.0, "min_lng": 92.0, "max_lng": 100.0, "height": 2500, "name": "马鬃山"}
+]
+
+SAND_SOURCE_AREAS = [
+    {"min_lat": 38.0, "max_lat": 42.0, "min_lng": 88.0, "max_lng": 95.0, "intensity": 0.9, "name": "塔克拉玛干沙漠东缘"},
+    {"min_lat": 39.0, "max_lat": 42.0, "min_lng": 95.0, "max_lng": 102.0, "intensity": 0.7, "name": "巴丹吉林沙漠"},
+    {"min_lat": 40.0, "max_lat": 42.0, "min_lng": 102.0, "max_lng": 106.0, "intensity": 0.6, "name": "腾格里沙漠"},
+    {"min_lat": 38.0, "max_lat": 40.0, "min_lng": 80.0, "max_lng": 88.0, "intensity": 0.85, "name": "塔克拉玛干沙漠腹地"}
+]
+
+def haversine_distance(lng1: float, lat1: float, lng2: float, lat2: float) -> float:
+    R = 6371.0
+    dLat = math.radians(lat2 - lat1)
+    dLng = math.radians(lng2 - lng1)
+    a = math.sin(dLat/2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dLng/2)**2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+    return R * c
+
+def calculate_bearing(lng1: float, lat1: float, lng2: float, lat2: float) -> float:
+    dLng = math.radians(lng2 - lng1)
+    lat1Rad = math.radians(lat1)
+    lat2Rad = math.radians(lat2)
+    y = math.sin(dLng) * math.cos(lat2Rad)
+    x = math.cos(lat1Rad) * math.sin(lat2Rad) - math.sin(lat1Rad) * math.cos(lat2Rad) * math.cos(dLng)
+    return math.degrees(math.atan2(y, x))
+
+def normalize_angle(angle: float) -> float:
+    while angle < 0:
+        angle += 360
+    while angle >= 360:
+        angle -= 360
+    return angle
+
+def get_terrain_elevation(lng: float, lat: float) -> float:
+    base_elevation = 1000
+    
+    for mountain in MAJOR_MOUNTAINS:
+        if mountain["min_lat"] <= lat <= mountain["max_lat"] and mountain["min_lng"] <= lng <= mountain["max_lng"]:
+            center_lat = (mountain["min_lat"] + mountain["max_lat"]) / 2
+            center_lng = (mountain["min_lng"] + mountain["max_lng"]) / 2
+            dist_to_center = math.sqrt((lng - center_lng)**2 + (lat - center_lat)**2)
+            height_factor = max(0, 1.0 - dist_to_center * 2)
+            return mountain["height"] * height_factor + base_elevation * (1 - height_factor)
+    
+    if 75 < lng < 90 and 37 < lat < 42:
+        return 800 + random.random() * 200
+    if 90 < lng < 100 and 38 < lat < 42:
+        return 1200 + random.random() * 300
+    if 74 < lng < 76 and 39 < lat < 40:
+        return 3000 + random.random() * 500
+    
+    return base_elevation + random.random() * 500
+
+def calculate_destination_point(lng: float, lat: float, bearing: float, distance_km: float) -> Tuple[float, float]:
+    R = 6371.0
+    latRad = math.radians(lat)
+    lngRad = math.radians(lng)
+    bearingRad = math.radians(bearing)
+    distRatio = distance_km / R
+    
+    destLat = math.asin(math.sin(latRad) * math.cos(distRatio) + 
+                       math.cos(latRad) * math.sin(distRatio) * math.cos(bearingRad))
+    destLng = lngRad + math.atan2(math.sin(bearingRad) * math.sin(distRatio) * math.cos(latRad),
+                                 math.cos(distRatio) - math.sin(latRad) * math.sin(destLat))
+    
+    return math.degrees(destLng), math.degrees(destLat)
+
+def calculate_sand_source_factor(lng: float, lat: float, wind_speed: float, wind_direction: float) -> float:
+    source_factor = 0
+    effective_radius = 300 + wind_speed * 5
+    
+    for source in SAND_SOURCE_AREAS:
+        source_center_lat = (source["min_lat"] + source["max_lat"]) / 2
+        source_center_lng = (source["min_lng"] + source["max_lng"]) / 2
+        distance = haversine_distance(lng, lat, source_center_lng, source_center_lat)
+        
+        if distance < effective_radius:
+            bearing_to_source = calculate_bearing(lng, lat, source_center_lng, source_center_lat)
+            wind_angle_diff = abs(normalize_angle(bearing_to_source - wind_direction))
+            
+            alignment_factor = max(0, math.cos(math.radians(wind_angle_diff)))
+            distance_factor = 1.0 - min(1.0, distance / effective_radius)
+            contribution = source["intensity"] * alignment_factor * distance_factor * 0.8
+            source_factor = max(source_factor, contribution)
+    
+    return min(1.0, source_factor)
+
+def calculate_terrain_blocking_factor(station_lng: float, station_lat: float, 
+                                       station_elevation: float, wind_speed: float, 
+                                       wind_direction: float) -> float:
+    block_factor = 1.0
+    upwind_direction = normalize_angle(wind_direction + 180)
+    sample_distance = 50
+    sample_count = 10
+    
+    max_elevation_diff = 0
+    max_blocking_angle = 0
+    
+    for i in range(1, sample_count + 1):
+        distance = sample_distance * i
+        upwind_lng, upwind_lat = calculate_destination_point(station_lng, station_lat, upwind_direction, distance)
+        sampled_elevation = get_terrain_elevation(upwind_lng, upwind_lat)
+        elevation_diff = sampled_elevation - station_elevation
+        
+        if elevation_diff > 0:
+            blocking_angle = math.degrees(math.atan2(elevation_diff, distance * 1000))
+            if blocking_angle > max_blocking_angle:
+                max_blocking_angle = blocking_angle
+            if elevation_diff > max_elevation_diff:
+                max_elevation_diff = elevation_diff
+    
+    for mountain in MAJOR_MOUNTAINS:
+        m_center_lat = (mountain["min_lat"] + mountain["max_lat"]) / 2
+        m_center_lng = (mountain["min_lng"] + mountain["max_lng"]) / 2
+        m_height = mountain["height"]
+        distance = haversine_distance(station_lng, station_lat, m_center_lng, m_center_lat)
+        
+        if distance < 500:
+            bearing_to_mountain = calculate_bearing(station_lng, station_lat, m_center_lng, m_center_lat)
+            angle_diff = abs(normalize_angle(bearing_to_mountain - upwind_direction))
+            
+            if angle_diff < 45:
+                elevation_diff = m_height - station_elevation
+                if elevation_diff > 0:
+                    blocking_angle = math.degrees(math.atan2(elevation_diff, distance * 1000))
+                    wind_factor = min(1.0, wind_speed / 50.0)
+                    mountain_block = max(0, 1.0 - blocking_angle / 30.0 * (1.0 - wind_factor * 0.5))
+                    block_factor = min(block_factor, mountain_block)
+    
+    if max_blocking_angle > 0:
+        local_block = max(0, 1.0 - max_blocking_angle / 20.0)
+        block_factor = min(block_factor, local_block)
+    
+    return max(0.1, block_factor)
+
 def calculate_sandstorm_probability(wind_speed: float, humidity: float,
-                                     temperature: float, terrain: str, season: str) -> float:
+                                     temperature: float, terrain: str, season: str,
+                                     station_lng: float = None, station_lat: float = None,
+                                     station_elevation: float = None, wind_direction: float = 180) -> float:
     wind_factor = min(1.0, wind_speed / 40.0)
     humidity_factor = max(0.0, 1.0 - humidity / 30.0)
     temp_factor = min(1.0, max(0.0, (temperature - 10) / 30.0))
@@ -98,9 +240,25 @@ def calculate_sandstorm_probability(wind_speed: float, humidity: float,
     season_factors = {"spring": 0.7, "summer": 0.8, "autumn": 0.6, "winter": 0.2}
     season_factor = season_factors.get(season, 0.5)
     
-    probability = (wind_factor * 0.35 + humidity_factor * 0.25 +
-                   temp_factor * 0.15 + terrain_factor * 0.15 +
-                   season_factor * 0.1)
+    sand_source_factor = 0
+    terrain_block_factor = 1.0
+    sand_transport_factor = 0
+    
+    if station_lng is not None and station_lat is not None:
+        sand_source_factor = calculate_sand_source_factor(station_lng, station_lat, wind_speed, wind_direction)
+        terrain_block_factor = calculate_terrain_blocking_factor(
+            station_lng, station_lat, station_elevation or 1000, wind_speed, wind_direction)
+        
+        velocity_factor = min(1.0, wind_speed / 50.0) ** 1.5
+        elevation_factor = max(0.3, 1.0 - (station_elevation or 1000) / 4000.0)
+        sand_transport_factor = velocity_factor * elevation_factor
+    
+    probability = (wind_factor * 0.25 + humidity_factor * 0.15 +
+                   temp_factor * 0.1 + terrain_factor * 0.12 +
+                   season_factor * 0.08 + sand_source_factor * 0.2 +
+                   sand_transport_factor * 0.1)
+    
+    probability *= terrain_block_factor
     
     return min(1.0, max(0.0, probability))
 
@@ -129,7 +287,10 @@ def generate_weather_data(station: Dict, current_time: datetime) -> Dict:
         precipitation = round(random.random() * 5, 1)
     
     terrain = get_terrain_type(station)
-    sandstorm_prob = calculate_sandstorm_probability(wind_speed, humidity, temperature, terrain, season)
+    sandstorm_prob = calculate_sandstorm_probability(
+        wind_speed, humidity, temperature, terrain, season,
+        station["lng"], station["lat"], station["elevation"], wind_direction
+    )
     sandstorm_prob = round(sandstorm_prob, 3)
     
     visibility = 10.0
