@@ -1,0 +1,80 @@
+weather:
+  sandstorm:
+    wind-threshold: 40.0
+    humidity-threshold: 30.0
+    weights:
+      wind: 0.25
+      humidity: 0.15
+      temperature: 0.10
+      terrain: 0.12
+      season: 0.08
+      sand-source: 0.20
+      sand-transport: 0.10
+
+  seasons:
+    spring:
+      sandstorm-factor: 0.7
+      base-temperature: 15
+      base-wind-speed: 25
+      wind-variance: 15
+      base-humidity: 35
+      humidity-variance: 15
+    summer:
+      sandstorm-factor: 0.8
+      base-temperature: 32
+      base-wind-speed: 20
+      wind-variance: 12
+      base-humidity: 25
+      humidity-variance: 15
+    autumn:
+      sandstorm-factor: 0.6
+      base-temperature: 12
+      base-wind-speed: 22
+      wind-variance: 18
+      base-humidity: 30
+      humidity-variance: 12
+    winter:
+      sandstorm-factor: 0.2
+      base-temperature: -5
+      base-wind-speed: 30
+      wind-variance: 20
+      base-humidity: 45
+      humidity-variance: 15
+
+  alert:
+    sandstorm-threshold: 0.6
+    wind-speed-threshold: 60.0
+    temperature-high-threshold: 45.0
+    temperature-low-threshold: -20.0
+    visibility-threshold: 1.0
+    water-supply-min-liters: 500
+
+  sand-transport:
+    reference-wind-speed: 50.0
+    max-elevation: 4000.0
+    min-elevation-factor: 0.3
+    velocity-exponent: 1.5
+
+  sand-source:
+    effective-radius-base-km: 300
+    effective-radius-wind-multiplier: 5.0
+    alignment-weight: 0.8
+
+pathfinding:
+  grid-resolution: 0.5
+  elevation-weight: 0.3
+  terrain-weight: 0.4
+  weather-weight: 0.3
+  max-iterations: 100000
+
+  genetic-algorithm:
+    population-size: 50
+    max-generations: 100
+    mutation-rate: 0.15
+    crossover-rate: 0.7
+    oasis-bonus-per-oasis: 15.0
+    distance-penalty-factor: 0.1
+    risk-penalty-factor: 100.0
+    tournament-size: 3
+    risk-improvement-threshold: 0.85
+    distance-tolerance-threshold: 1.25

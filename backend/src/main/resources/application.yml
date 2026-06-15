@@ -29,18 +29,7 @@ spring:
       write-dates-as-timestamps: false
     default-property-inclusion: non_null
 
-weather:
-  alert:
-    sandstorm-threshold: 0.6
-    wind-speed-threshold: 60.0
-    temperature-high-threshold: 45.0
-    temperature-low-threshold: -20.0
-    visibility-threshold: 1.0
-    water-supply-min-liters: 500
-
-pathfinding:
-  grid-resolution: 0.5
-  elevation-weight: 0.3
-  terrain-weight: 0.4
-  weather-weight: 0.3
-  max-iterations: 100000
+  config:
+    import:
+      - classpath:terrain-params.yml
+      - classpath:weather-params.yml

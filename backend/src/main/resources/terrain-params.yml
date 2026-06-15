@@ -1,0 +1,86 @@
+terrain:
+  mountains:
+    - name: "昆仑山"
+      min-lat: 35.0
+      max-lat: 39.0
+      min-lng: 75.0
+      max-lng: 80.0
+      height: 5500
+    - name: "天山山脉"
+      min-lat: 39.0
+      max-lat: 45.0
+      min-lng: 74.0
+      max-lng: 96.0
+      height: 4000
+    - name: "祁连山"
+      min-lat: 35.0
+      max-lat: 40.0
+      min-lng: 95.0
+      max-lng: 104.0
+      height: 3500
+    - name: "喀喇昆仑山"
+      min-lat: 32.0
+      max-lat: 36.0
+      min-lng: 80.0
+      max-lng: 95.0
+      height: 6000
+    - name: "马鬃山"
+      min-lat: 40.0
+      max-lat: 42.0
+      min-lng: 92.0
+      max-lng: 100.0
+      height: 2500
+
+  sand-sources:
+    - name: "塔克拉玛干沙漠东缘"
+      min-lat: 38.0
+      max-lat: 42.0
+      min-lng: 88.0
+      max-lng: 95.0
+      intensity: 0.9
+    - name: "巴丹吉林沙漠"
+      min-lat: 39.0
+      max-lat: 42.0
+      min-lng: 95.0
+      max-lng: 102.0
+      intensity: 0.7
+    - name: "腾格里沙漠"
+      min-lat: 40.0
+      max-lat: 42.0
+      min-lng: 102.0
+      max-lng: 106.0
+      intensity: 0.6
+    - name: "塔克拉玛干沙漠腹地"
+      min-lat: 38.0
+      max-lat: 40.0
+      min-lng: 80.0
+      max-lng: 88.0
+      intensity: 0.85
+
+  blocking:
+    upwind-sample-distance-km: 50
+    upwind-sample-count: 10
+    max-mountain-check-distance-km: 500
+    blocking-angle-divisor: 30.0
+    local-blocking-angle-divisor: 20.0
+    min-block-factor: 0.1
+    strong-wind-speed-kmh: 50.0
+    wind-offset-ratio: 0.5
+    mountain-angle-tolerance: 45.0
+
+  elevation:
+    base-elevation: 1000
+    tarim-basin:
+      min-lng: 75.0
+      max-lng: 90.0
+      min-lat: 37.0
+      max-lat: 42.0
+      base: 800
+      variance: 200
+    hexi-corridor:
+      min-lng: 90.0
+      max-lng: 100.0
+      min-lat: 38.0
+      max-lat: 42.0
+      base: 1200
+      variance: 300

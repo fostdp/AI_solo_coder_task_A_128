@@ -1,14 +1,17 @@
-package com.silkroad.service;
+package com.silkroad.route_planner.service;
 
+import com.silkroad.common.event.CaravanStatusEvent;
 import com.silkroad.dto.CaravanStatusDTO;
 import com.silkroad.entity.Caravan;
 import com.silkroad.entity.Waypoint;
 import com.silkroad.repository.CaravanRepository;
 import com.silkroad.repository.WaypointRepository;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.locationtech.jts.geom.Coordinate;
 import org.locationtech.jts.geom.GeometryFactory;
 import org.locationtech.jts.geom.Point;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.messaging.simp.SimpMessagingTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
@@ -19,11 +22,13 @@ import java.util.stream.Collectors;
 
 @Service
 @RequiredArgsConstructor
-public class CaravanService {
+@Slf4j
+public class PlannerCaravanService {
 
     private final CaravanRepository caravanRepository;
     private final WaypointRepository waypointRepository;
     private final SimpMessagingTemplate messagingTemplate;
+    private final ApplicationEventPublisher eventPublisher;
 
     private final GeometryFactory geometryFactory = new GeometryFactory();
     private static final double EARTH_RADIUS_KM = 6371.0;
@@ -35,9 +40,7 @@ public class CaravanService {
     }
 
     public CaravanStatusDTO getCaravanById(Long id) {
-        return caravanRepository.findById(id)
-                .map(this::toDTO)
-                .orElse(null);
+        return caravanRepository.findById(id).map(this::toDTO).orElse(null);
     }
 
     public Caravan createCaravan(Caravan caravan) {
@@ -46,31 +49,31 @@ public class CaravanService {
         return caravanRepository.save(caravan);
     }
 
-    public Caravan updateCaravanStatus(Long id, String status) {
+    public boolean startCaravan(Long id) {
         Optional<Caravan> opt = caravanRepository.findById(id);
         if (opt.isPresent()) {
             Caravan caravan = opt.get();
-            caravan.setStatus(status);
+            caravan.setStatus("EN_ROUTE");
+            caravan.setDepartureTime(LocalDateTime.now());
             caravan.setUpdatedAt(LocalDateTime.now());
-            Caravan saved = caravanRepository.save(caravan);
-            broadcastCaravanUpdate(saved);
-            return saved;
+            caravanRepository.save(caravan);
+            broadcastAndPublishEvent(caravan);
+            return true;
         }
-        return null;
+        return false;
     }
 
-    public Caravan moveCaravan(Long id, double lng, double lat) {
+    public boolean stopCaravan(Long id) {
         Optional<Caravan> opt = caravanRepository.findById(id);
         if (opt.isPresent()) {
             Caravan caravan = opt.get();
-            Point newPos = geometryFactory.createPoint(new Coordinate(lng, lat));
-            caravan.setCurrentPosition(newPos);
+            caravan.setStatus("RESTING");
             caravan.setUpdatedAt(LocalDateTime.now());
-            Caravan saved = caravanRepository.save(caravan);
-            broadcastCaravanUpdate(saved);
-            return saved;
+            caravanRepository.save(caravan);
+            broadcastAndPublishEvent(caravan);
+            return true;
         }
-        return null;
+        return false;
     }
 
     @Scheduled(fixedRate = 5000)
@@ -109,21 +112,30 @@ public class CaravanService {
 
             caravan.setUpdatedAt(LocalDateTime.now());
             caravanRepository.save(caravan);
-            broadcastCaravanUpdate(caravan);
+            broadcastAndPublishEvent(caravan);
         }
     }
 
+    private void broadcastAndPublishEvent(Caravan caravan) {
+        CaravanStatusDTO dto = toDTO(caravan);
+        messagingTemplate.convertAndSend("/topic/caravans", dto);
+        messagingTemplate.convertAndSend("/topic/caravans/" + caravan.getId(), dto);
+
+        eventPublisher.publishEvent(new CaravanStatusEvent(
+                this,
+                caravan.getId(),
+                caravan.getStatus(),
+                caravan.getWaterSupplyLiters(),
+                caravan.getCurrentPosition() != null ? caravan.getCurrentPosition().getX() : null,
+                caravan.getCurrentPosition() != null ? caravan.getCurrentPosition().getY() : null
+        ));
+    }
+
     private Waypoint findNextWaypoint(Caravan caravan, List<Waypoint> waypoints) {
-        if (caravan.getCurrentWaypointId() == null) {
-            return waypoints.get(0);
-        }
+        if (caravan.getCurrentWaypointId() == null) return waypoints.get(0);
         for (int i = 0; i < waypoints.size(); i++) {
             if (waypoints.get(i).getId().equals(caravan.getCurrentWaypointId())) {
-                if (i < waypoints.size() - 1) {
-                    return waypoints.get(i + 1);
-                } else {
-                    return waypoints.get(0);
-                }
+                return i < waypoints.size() - 1 ? waypoints.get(i + 1) : waypoints.get(0);
             }
         }
         return waypoints.get(0);
@@ -133,18 +145,15 @@ public class CaravanService {
         double hours = distanceKm / (caravan.getSpeedKmh() != null ? caravan.getSpeedKmh() : 5.0);
         double waterPerHour = (caravan.getCrewCount() != null ? caravan.getCrewCount() : 20) * 0.5;
         double foodPerHour = (caravan.getCrewCount() != null ? caravan.getCrewCount() : 20) * 0.02;
-
         double water = caravan.getWaterSupplyLiters() != null ? caravan.getWaterSupplyLiters() : 2000;
         double food = caravan.getFoodSupplyDays() != null ? caravan.getFoodSupplyDays() : 30;
-
         caravan.setWaterSupplyLiters(Math.max(0, water - waterPerHour * hours));
         caravan.setFoodSupplyDays(Math.max(0, food - foodPerHour * hours));
     }
 
     private void checkWaypointArrival(Caravan caravan, Waypoint waypoint) {
         if (Boolean.TRUE.equals(waypoint.getWaterAvailable())) {
-            double maxWater = 3000;
-            caravan.setWaterSupplyLiters(maxWater);
+            caravan.setWaterSupplyLiters(3000.0);
         }
         if (Boolean.TRUE.equals(waypoint.getSupplyStation())) {
             caravan.setFoodSupplyDays(30.0);
@@ -161,19 +170,12 @@ public class CaravanService {
         return EARTH_RADIUS_KM * c;
     }
 
-    private void broadcastCaravanUpdate(Caravan caravan) {
-        CaravanStatusDTO dto = toDTO(caravan);
-        messagingTemplate.convertAndSend("/topic/caravans", dto);
-        messagingTemplate.convertAndSend("/topic/caravans/" + caravan.getId(), dto);
-    }
-
     private CaravanStatusDTO toDTO(Caravan caravan) {
         double waterDays = 0;
         if (caravan.getWaterSupplyLiters() != null && caravan.getCrewCount() != null) {
             double dailyConsumption = caravan.getCrewCount() * 12;
             waterDays = dailyConsumption > 0 ? caravan.getWaterSupplyLiters() / dailyConsumption : 0;
         }
-
         return CaravanStatusDTO.builder()
                 .caravanId(caravan.getId())
                 .name(caravan.getName())
@@ -183,42 +185,11 @@ public class CaravanService {
                 .routeId(caravan.getRouteId())
                 .speedKmh(caravan.getSpeedKmh())
                 .waterSupplyLiters(caravan.getWaterSupplyLiters())
-                .waterRemainingDays(round2(waterDays))
+                .waterRemainingDays(Math.round(waterDays * 100.0) / 100.0)
                 .foodSupplyDays(caravan.getFoodSupplyDays())
                 .cargoType(caravan.getCargoType())
                 .lastUpdate(caravan.getUpdatedAt())
                 .activeAlerts(Collections.emptyList())
                 .build();
-    }
-
-    private double round2(double value) {
-        return Math.round(value * 100.0) / 100.0;
-    }
-
-    public boolean startCaravan(Long id) {
-        Optional<Caravan> opt = caravanRepository.findById(id);
-        if (opt.isPresent()) {
-            Caravan caravan = opt.get();
-            caravan.setStatus("EN_ROUTE");
-            caravan.setDepartureTime(LocalDateTime.now());
-            caravan.setUpdatedAt(LocalDateTime.now());
-            caravanRepository.save(caravan);
-            broadcastCaravanUpdate(caravan);
-            return true;
-        }
-        return false;
-    }
-
-    public boolean stopCaravan(Long id) {
-        Optional<Caravan> opt = caravanRepository.findById(id);
-        if (opt.isPresent()) {
-            Caravan caravan = opt.get();
-            caravan.setStatus("RESTING");
-            caravan.setUpdatedAt(LocalDateTime.now());
-            caravanRepository.save(caravan);
-            broadcastCaravanUpdate(caravan);
-            return true;
-        }
-        return false;
     }
 }

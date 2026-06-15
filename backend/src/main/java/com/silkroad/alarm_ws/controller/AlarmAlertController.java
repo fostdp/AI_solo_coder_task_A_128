@@ -1,8 +1,7 @@
-package com.silkroad.controller;
+package com.silkroad.alarm_ws.controller;
 
 import com.silkroad.dto.AlertDTO;
-import com.silkroad.entity.Alert;
-import com.silkroad.service.AlertService;
+import com.silkroad.alarm_ws.service.AlarmAlertService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
@@ -11,9 +10,9 @@ import java.util.List;
 @RestController
 @RequestMapping("/alerts")
 @RequiredArgsConstructor
-public class AlertController {
+public class AlarmAlertController {
 
-    private final AlertService alertService;
+    private final AlarmAlertService alertService;
 
     @GetMapping
     public List<AlertDTO> getActiveAlerts() {
@@ -21,23 +20,22 @@ public class AlertController {
     }
 
     @GetMapping("/route/{routeId}")
-    public List<AlertDTO> getAlertsByRoute(@PathVariable Long routeId) {
+    public List<AlertDTO> getRouteAlerts(@PathVariable Long routeId) {
         return alertService.getAlertsByRoute(routeId);
     }
 
     @GetMapping("/caravan/{caravanId}")
-    public List<AlertDTO> getAlertsByCaravan(@PathVariable Long caravanId) {
+    public List<AlertDTO> getCaravanAlerts(@PathVariable Long caravanId) {
         return alertService.getAlertsByCaravan(caravanId);
     }
 
     @PutMapping("/{id}/resolve")
-    public Alert resolveAlert(@PathVariable Long id) {
-        return alertService.resolveAlert(id);
+    public void resolveAlert(@PathVariable Long id) {
+        alertService.resolveAlert(id);
     }
 
     @PostMapping("/simulate/sandstorm/{routeId}")
-    public String simulateSandstorm(@PathVariable Long routeId) {
+    public void simulateSandstorm(@PathVariable Long routeId) {
         alertService.simulateSandstormAlert(routeId);
-        return "沙尘暴模拟告警已触发";
     }
 }
